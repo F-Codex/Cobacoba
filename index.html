@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Leaflet - Live Tracking + Rute & Luasan</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Leaflet & Plugin CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-control-layers/dist/leaflet-control-layers.min.css" />
+
+  <style>
+    #map { height: 100vh; width: 100%; }
+    #locate-button, #start-pause-button, #export-geojson {
+      position: absolute;
+      bottom: 10px;
+      right: 10px;
+      z-index: 1000;
+      background: white;
+      padding: 6px 12px;
+      margin-top: 5px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+      cursor: pointer;
+    }
+    #start-pause-button { bottom: 50px; }
+    #export-geojson { bottom: 90px; }
+
+    .info {
+      padding: 8px 12px;
+      background: white;
+      border-radius: 4px;
+      box-shadow: 0 0 5px rgba(0,0,0,0.2);
+      font-size: 14px;
+    }
+
+    .popup-table {
+      font-size: 14px;
+      border-collapse: collapse;
+    }
+
+    .popup-table td {
+      padding: 3px 6px;
+      border-bottom: 1px solid #ddd;
+    }
+
+    .popup-table td:first-child {
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+<button id="locate-button">Lokasi Saya</button>
+<button id="start-pause-button">Mulai Tracking</button>
+<button id="export-geojson">Simpan GeoJSON</button>
+
+<!-- Scripts -->
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-control-layers/dist/leaflet-control-layers.min.js"></script>
+<script src="https://unpkg.com/leaflet-ajax/dist/leaflet.ajax.min.js"></script>
+<script src="https://unpkg.com/@turf/turf/turf.min.js"></script>
+
+<script>
+  const map = L.map('map').setView([-7.8, 110.3], 12);
+  const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '© OpenStreetMap contributors'
+  }).addTo(map);
+  const googleSat = L.tileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', { maxZoom: 20 });
+  const googleStreet = L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', { maxZoom: 20 });
+  const esriImagery = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 20 });
+
+  const baseMaps = {
+    "OpenStreetMap": osm,
+    "Google Street": googleStreet,
+    "Google Satellite": googleSat,
+    "Esri Imagery": esriImagery
+  };
+  L.control.layers(baseMaps).addTo(map);
+
+  // GeoJSON eksternal
+  new L.GeoJSON.AJAX("blok_demo1.geojson", {
+    onEachFeature: function (feature, layer) {
+      const props = feature.properties;
+      let popup = 'Tidak ada atribut.';
+      if (props.name) {
+        const attributes = props.name.split(',').map(pair => pair.trim().split(':'));
+        popup = `<table class="popup-table">`;
+        attributes.forEach(([k, v]) => {
+          popup += `<tr><td><b>${k}</b></td><td>${v || '-'}</td></tr>`;
+        });
+        popup += `</table>`;
+      }
+      layer.bindPopup(popup);
+    },
+    style: { color: "#FF6600", weight: 1.5, fillOpacity: 0.2 }
+  }).addTo(map);
+
+  // Tracking
+  let marker, lastLatLng;
+  let trackPoints = [];
+  let routeLine = L.polyline([], { color: 'blue' }).addTo(map);
+  let areaPolygon;
+  let totalDistance = 0;
+  let tracking = false;
+  let watchID = null;
+
+  const infoBox = L.control({ position: 'topleft' });
+  infoBox.onAdd = function () {
+    this._div = L.DomUtil.create('div', 'info');
+    this.update();
+    return this._div;
+  };
+  infoBox.update = function (dist = 0, area = 0) {
+    this._div.innerHTML = `
+      <h4>Info Tracking</h4>
+      <b>Jarak:</b> ${(dist / 1000).toFixed(2)} km<br>
+      <b>Luas:</b> ${area > 0 ? area.toFixed(2) + ' m² (' + (area / 10000).toFixed(2) + ' ha)' : '-'}
+    `;
+  };
+  infoBox.addTo(map);
+
+  function startTracking() {
+    if (!navigator.geolocation) {
+      alert("Browser tidak mendukung geolocation.");
+      return;
+    }
+
+    tracking = true;
+    document.getElementById('start-pause-button').innerText = "Pause Tracking";
+
+    watchID = navigator.geolocation.watchPosition(
+      (position) => {
+        const latlng = [position.coords.latitude, position.coords.longitude];
+        lastLatLng = latlng;
+
+        if (!marker) {
+          marker = L.circleMarker(latlng, {
+            radius: 8, fillColor: "#4285F4", color: "#fff", weight: 2, fillOpacity: 1
+          }).addTo(map);
+        } else {
+          marker.setLatLng(latlng);
+        }
+
+        map.setView(latlng, 18);
+
+        if (tracking) {
+          trackPoints.push(latlng);
+          routeLine.setLatLngs(trackPoints);
+
+          if (trackPoints.length > 1) {
+            const from = turf.point(trackPoints[trackPoints.length - 2]);
+            const to = turf.point(trackPoints[trackPoints.length - 1]);
+            const segment = turf.distance(from, to, { units: 'meters' });
+            totalDistance += segment;
+          }
+
+          infoBox.update(totalDistance, areaPolygon ? turf.area(areaPolygon.toGeoJSON()) : 0);
+        }
+      },
+      (err) => alert("Gagal tracking lokasi: " + err.message),
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+    );
+  }
+
+  function pauseTracking() {
+    tracking = false;
+    if (watchID !== null) {
+      navigator.geolocation.clearWatch(watchID);
+      watchID = null;
+    }
+    document.getElementById('start-pause-button').innerText = "Mulai Tracking";
+  }
+
+  document.getElementById("start-pause-button").onclick = function () {
+    if (!tracking) {
+      startTracking();
+    } else {
+      pauseTracking();
+    }
+  };
+
+  document.getElementById("locate-button").onclick = function () {
+    if (lastLatLng) {
+      map.setView(lastLatLng, 18);
+    }
+  };
+
+  document.getElementById("export-geojson").onclick = function () {
+    const features = [];
+
+    if (trackPoints.length > 1) {
+      const line = turf.lineString(trackPoints, { name: "Rute Tracking" });
+      features.push(line);
+    }
+
+    if (trackPoints.length > 2) {
+      const closed = [...trackPoints, trackPoints[0]];
+      const polygon = turf.polygon([closed], { name: "Area Tracking" });
+      features.push(polygon);
+    }
+
+    if (features.length === 0) {
+      alert("Belum ada data untuk disimpan.");
+      return;
+    }
+
+    const geojson = {
+      type: "FeatureCollection",
+      features: features
+    };
+
+    const blob = new Blob([JSON.stringify(geojson)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "tracking_result.geojson";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+</script>
+
+</body>
+</html>
